@@ -10,6 +10,7 @@ import types
 from pathlib import Path
 from typing import Union, List, Tuple
 from PIL import Image
+import os
 
 
 class ViTExtractor:
@@ -328,10 +329,32 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
+def reshape_descriptors(descriptors, image_batch, extractor):
+    _,_,T,D = descriptors.shape
+    B,C,H,W = image_batch.shape
+    hp, wp = extractor.num_patches
+    p = extractor.p
+    stride = extractor.stride
+    # Convert T to patch sizes
+    patch_array = descriptors.reshape(hp, wp, D)
+
+    # Convert patch sizes to coordinates on image
+    img = torch.zeros((H, W, D))
+    for ph in range(hp):
+        for pw in range(wp):
+            img_h = p + stride[0]*(ph - 1)
+            img_w = p + stride[1]*(pw - 1)
+            # img[img_h, img_w] = patch_array[ph, pw]
+            img[img_h-stride[0]//2:img_h+stride[0]//2, img_w-stride[1]//2:img_w+stride[1]//2] = patch_array[ph, pw]
+    print("reshaped image descriptor size ", img.shape)
+    return img 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Facilitate ViT Descriptor extraction.')
     parser.add_argument('--image_path', type=str, required=True, help='path of the extracted image.')
     parser.add_argument('--output_path', type=str, required=True, help='path to file containing extracted descriptors.')
+    parser.add_argument('--is_dir', type=bool, default=False, help='directory specified')
+    parser.add_argument('--load_size', default=224, type=int, nargs="+", help='load size of the input image.') 
     parser.add_argument('--load_size', default=224, type=int, help='load size of the input image.')
     parser.add_argument('--stride', default=4, type=int, help="""stride of first convolution layer. 
                                                               small stride -> higher resolution.""")
@@ -343,15 +366,37 @@ if __name__ == "__main__":
                                                                     options: ['key' | 'query' | 'value' | 'token']""")
     parser.add_argument('--layer', default=11, type=int, help="layer to create descriptors from.")
     parser.add_argument('--bin', default='False', type=str2bool, help="create a binned descriptor if True.")
-
+    parser.add_argument('--reshape', default=False, type=bool, help="reshape dimensions of descriptors")
+    
     args = parser.parse_args()
 
     with torch.no_grad():
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         extractor = ViTExtractor(args.model_type, args.stride, device=device)
-        image_batch, image_pil = extractor.preprocess(args.image_path, args.load_size)
-        print(f"Image {args.image_path} is preprocessed to tensor of size {image_batch.shape}.")
-        descriptors = extractor.extract_descriptors(image_batch.to(device), args.layer, args.facet, args.bin)
-        print(f"Descriptors are of size: {descriptors.shape}")
-        torch.save(descriptors, args.output_path)
-        print(f"Descriptors saved to: {args.output_path}")
+        load_size = args.load_size
+        if args.is_dir:
+            print('img path ', args.image_path)
+            for in_file in os.listdir(args.image_path):
+                in_path = f'{args.image_path}/{in_file}'
+                print('infile ', in_file)
+                file_name = in_file.split('.')[0]
+                out_file = f'{file_name}.pt'
+                out_path = f'{args.output_path}/{out_file}'
+                image_batch, image_pil = extractor.preprocess(in_path, load_size)
+                print(f"Image {in_path} is preprocessed to tensor of size {image_batch.shape}.")
+                descriptors = extractor.extract_descriptors(image_batch.to(device), args.layer, args.facet, args.bin)
+                # image batch: 1,3,224,298, layer:11, facet: key, bin:False
+                print(f"Descriptors are of size: {descriptors.shape}")
+                if args.reshape:
+                    descriptors = reshape_descriptors(descriptors, image_batch, extractor)
+                torch.save(descriptors, out_path)
+                print(f"Descriptors saved to: {out_path}")
+        else:
+            image_batch, image_pil = extractor.preprocess(args.image_path, load_size)
+            print(f"Image {args.image_path} is preprocessed to tensor of size {image_batch.shape}.")
+            descriptors = extractor.extract_descriptors(image_batch.to(device), args.layer, args.facet, args.bin)
+            print(f"Descriptors are of size: {descriptors.shape}")
+            if args.reshape:
+                    descriptors = reshape_descriptors(descriptors, image_batch, extractor)
+            torch.save(descriptors, args.output_path)
+            print(f"Descriptors saved to: {args.output_path}")
